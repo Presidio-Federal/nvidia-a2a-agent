@@ -8,7 +8,7 @@ Built for the NVIDIA booth at Cisco Live 2026.
 
 ## AI Studio orchestration and A2A delegation
 
-**Presidio AI Studio** is the central **AI Agent Platform** in the cloud: it coordinates agents and workflows. In the **P.A.T.H. Lab**, **Cisco AI Rally Kit** hardware with **NVIDIA GPUs** runs **local model inference** that AI Studio uses for sensitive or latency-sensitive steps. The **AI Studio Network Ops agent** delegates infrastructure and network tasks to **local and remote agents** (including this Factory Edge Agent) over the **Agent-to-Agent (A2A)** protocol.
+**Presidio AI Studio** is the central **AI Agent Platform** in the cloud: it coordinates agents and workflows. The **P.A.T.H. Lab** is **not** “local” in the sense of a customer site—it is **centralized lab infrastructure**: **Cisco AI Rally Kit** with **NVIDIA GPUs** provides **centralized LLM inference** that AI Studio can use for shared or lab-hosted workloads. Separately, **edge agents** such as this **Factory Edge Agent** run a **local LLM on their own on-site GPUs** (e.g. Ollama on T4s at the deployment site) so sensitive tool calls and data stay at that site. The **AI Studio Network Ops agent** delegates infrastructure and network tasks to those **edge / remote agents** over the **Agent-to-Agent (A2A)** protocol.
 
 ```mermaid
 flowchart TB
@@ -18,23 +18,23 @@ flowchart TB
         Platform --> NetOps
     end
 
-    subgraph PATH["P.A.T.H. Lab"]
+    subgraph PATH["P.A.T.H. Lab — centralized LLM capacity"]
         Rally["Cisco AI Rally Kit"]
-        GPULab["NVIDIA GPUs — local model inference"]
-        Rally --> GPULab
+        CentralLLM["Centralized LLM inference\n(shared NVIDIA GPUs in lab)"]
+        Rally --> CentralLLM
     end
 
-    subgraph Edge["Local / remote agents"]
-        Factory["Factory Edge Agent\n(on-prem NAT + LangGraph)"]
-        Peers["Other A2A-capable agents\n(edge or partner sites)"]
+    subgraph Edge["Edge / remote agents — on-site inference"]
+        Factory["Factory Edge Agent\nlocal LLM on edge GPUs + NAT + LangGraph"]
+        Peers["Other A2A agents\neach with its own inference stack"]
     end
 
-    Platform -.->|"Uses lab stack for inference"| Rally
+    Platform -.->|"Uses lab for centralized inference"| Rally
     NetOps -->|"A2A — delegate tasks"| Factory
     NetOps -->|"A2A — delegate tasks"| Peers
 ```
 
-The diagram below zooms into the **Factory Edge Agent** stack (tunnels, NAT, LangGraph, Ollama, MCP).
+The diagram below zooms into the **Factory Edge Agent** stack (tunnels, NAT, LangGraph, **on-site** Ollama + MCP).
 
 ---
 
