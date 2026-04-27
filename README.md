@@ -6,6 +6,38 @@ Built for the NVIDIA booth at Cisco Live 2026.
 
 ---
 
+## AI Studio orchestration and A2A delegation
+
+**Presidio AI Studio** is the central **AI Agent Platform** in the cloud: it coordinates agents and workflows. In the **P.A.T.H. Lab**, **Cisco AI Rally Kit** hardware with **NVIDIA GPUs** runs **local model inference** that AI Studio uses for sensitive or latency-sensitive steps. The **AI Studio Network Ops agent** delegates infrastructure and network tasks to **local and remote agents** (including this Factory Edge Agent) over the **Agent-to-Agent (A2A)** protocol.
+
+```mermaid
+flowchart TB
+    subgraph Cloud["Cloud — AI Agent Platform"]
+        Platform["AI Studio\nCentral agent orchestration"]
+        NetOps["AI Studio\nNetwork Ops agent"]
+        Platform --> NetOps
+    end
+
+    subgraph PATH["P.A.T.H. Lab"]
+        Rally["Cisco AI Rally Kit"]
+        GPULab["NVIDIA GPUs — local model inference"]
+        Rally --> GPULab
+    end
+
+    subgraph Edge["Local / remote agents"]
+        Factory["Factory Edge Agent\n(on-prem NAT + LangGraph)"]
+        Peers["Other A2A-capable agents\n(edge or partner sites)"]
+    end
+
+    Platform -.->|"Uses lab stack for inference"| Rally
+    NetOps -->|"A2A — delegate tasks"| Factory
+    NetOps -->|"A2A — delegate tasks"| Peers
+```
+
+The diagram below zooms into the **Factory Edge Agent** stack (tunnels, NAT, LangGraph, Ollama, MCP).
+
+---
+
 ## End Goal
 
 Act as a **remote autonomous agent** with:
