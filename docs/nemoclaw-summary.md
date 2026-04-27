@@ -6,7 +6,7 @@
 - **GPUs:** 2x NVIDIA Tesla T4 (16GB VRAM each), passed through to the LXC container
 - **OS:** Debian (inside Proxmox LXC)
 - **Container Runtime:** Docker CE with NVIDIA Container Toolkit for GPU passthrough
-- **Network:** Server IP `192.168.200.10`, accessible from local Mac
+- **Network:** Private LAN IP, accessible from local Mac
 
 ---
 
@@ -56,9 +56,9 @@ docker exec ollama ollama pull qwen3:8b
 docker run -d \
   -p 3010:3010 \
   -e DISABLE_JWT_AUTH=true \
-  -e CML_HOST=cml.presidio.tech \
-  -e CML_USERNAME=lvanginkel@presidio.com \
-  -e CML_PASSWORD=<YOUR_PASSWORD> \
+  -e CML_HOST=<CML_HOST> \
+  -e CML_USERNAME=<CML_USERNAME> \
+  -e CML_PASSWORD=<CML_PASSWORD> \
   -e CML_VERIFY_SSL=false \
   --name cml-mcp-server \
   --restart unless-stopped \
@@ -129,7 +129,7 @@ Without this, the UI shows "origin not allowed":
 
 ```bash
 # From inside the sandbox (if permissions are fixed), or via docker exec sed
-openclaw config set gateway.controlUi.allowedOrigins '["http://192.168.200.10:18789"]'
+openclaw config set gateway.controlUi.allowedOrigins '["http://<SERVER_IP>:18789"]'
 openclaw config set gateway.controlUi.allowInsecureAuth true
 ```
 
@@ -147,7 +147,7 @@ openclaw config set mcp.servers.cml-mcp --json '{"url": "http://host.openshell.i
 openshell forward start 0.0.0.0:18789 <SANDBOX_NAME> -d
 ```
 
-Then access the UI at `http://192.168.200.10:18789/#token=<TOKEN_FROM_ONBOARD_OUTPUT>`.
+Then access the UI at `http://<SERVER_IP>:18789/#token=<TOKEN_FROM_ONBOARD_OUTPUT>`.
 
 ### Restart the gateway inside the sandbox
 
@@ -169,7 +169,7 @@ Skills are directories containing a `SKILL.md` file with YAML frontmatter. From 
 
 ```bash
 # SCP zipped skills to the server into a persistent location
-scp my-skill.zip root@192.168.200.10:/root/skills/
+scp my-skill.zip root@<SERVER_IP>:/root/skills/
 
 # On the server, unzip
 mkdir -p /root/skills
@@ -209,7 +209,7 @@ The `nemoclaw skill install` command handles uploading the skill into the sandbo
 ## Architecture Summary
 
 ```
-Mac (browser) --> http://192.168.200.10:18789 --> OpenShell Port Forward
+Mac (browser) --> http://<SERVER_IP>:18789 --> OpenShell Port Forward
   --> NemoClaw Sandbox (OpenClaw Gateway on 0.0.0.0:18789)
     --> Ollama (qwen3:8b) via host.openshell.internal:11434
     --> CML MCP Server via host.openshell.internal:3010

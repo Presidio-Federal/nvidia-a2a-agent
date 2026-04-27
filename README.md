@@ -56,7 +56,7 @@ flowchart TB
 | **GPU Passthrough** | Via Proxmox to LXC container |
 | **OS** | Debian (inside LXC) |
 | **Container Runtime** | Docker CE with NVIDIA Container Toolkit |
-| **Server IP** | 192.168.200.10 |
+| **Server IP** | Private LAN (behind Cloudflare tunnel) |
 
 ---
 
@@ -363,7 +363,7 @@ For visual graph debugging, run the LangGraph dev server on a separate port:
 cd /opt/demo-agent && /home/.venv/bin/langgraph dev --port 8123 --host 0.0.0.0
 ```
 
-Then connect LangGraph Studio at `https://smith.langchain.com/studio` pointing to `http://192.168.200.10:8123`.
+Then connect LangGraph Studio at `https://smith.langchain.com/studio` pointing to `http://<SERVER_IP>:8123`.
 
 This runs a second instance of the agent for visualization only. Production traffic goes through `nat-serve` on port 8000.
 
