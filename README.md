@@ -50,10 +50,10 @@ Act as a **remote autonomous agent** with:
 ```mermaid
 flowchart TB
     AIStudio["Presidio AI Studio"] -->|"A2A Protocol"| CF["Cloudflare Tunnel"]
-    CF -->|"a2a.vanginkel.tech"| A2A["NAT A2A Server :10000"]
+    CF -->|"a2a.presidio.tech"| A2A["NAT A2A Server :10000"]
     A2A --> NATServe["NAT API Server :8000"]
 
-    Browser["Operator Browser"] -->|"agent.vanginkel.tech"| CF2["Cloudflare Tunnel"]
+    Browser["Operator Browser"] -->|"agent.presidio.tech"| CF2["Cloudflare Tunnel"]
     CF2 --> NATUI["NAT UI :3000"]
     NATUI --> NATServe
 
@@ -176,18 +176,122 @@ The agent is exposed to the internet through Cloudflare Tunnels with Zero Trust 
 ```mermaid
 flowchart LR
     Internet["Internet"] --> CF["Cloudflare Edge"]
-    CF -->|"agent.vanginkel.tech"| Tunnel1["Cloudflare Tunnel"]
-    CF -->|"a2a.vanginkel.tech"| Tunnel2["Cloudflare Tunnel"]
+    CF -->|"agent.presidio.tech"| Tunnel1["Cloudflare Tunnel"]
+    CF -->|"a2a.presidio.tech"| Tunnel2["Cloudflare Tunnel"]
+    CF -->|"auth.presidio.tech"| Tunnel3["Cloudflare Tunnel"]
     Tunnel1 -->|"localhost:3000"| NATUI["NAT UI"]
     Tunnel2 -->|"localhost:10000"| A2A["NAT A2A Server"]
+    Tunnel3 -->|"localhost:8080"| KC["Keycloak"]
 ```
 
 | Endpoint | URL | Backend | Auth |
 |----------|-----|---------|------|
-| **NAT UI** | `https://agent.vanginkel.tech` | `localhost:3000` | Cloudflare Access (SSO) |
-| **A2A Gateway** | `https://a2a.vanginkel.tech` | `localhost:10000` | Bearer token (`A2A_BEARER_TOKEN` in `.env`) |
+| **NAT UI** | `https://agent.presidio.tech` | `localhost:3000` | Cloudflare Access (SSO) |
+| **A2A Gateway** | `https://a2a.presidio.tech` | `localhost:10000` | OAuth2 Bearer token (JWT) |
+| **Keycloak IdP** | `https://auth.presidio.tech` | `localhost:8080` | Cloudflare Access Bypass for `/realms/*` |
 
-The A2A endpoint accepts JSON-RPC requests following the A2A protocol specification. The agent card is available at `https://a2a.vanginkel.tech/.well-known/agent.json`.
+The A2A endpoint accepts JSON-RPC requests following the A2A protocol specification. The agent card is available at `https://a2a.presidio.tech/.well-known/agent-card.json`.
+
+---
+
+## OAuth2 Authentication (Keycloak + A2A)
+
+The A2A endpoint is protected by OAuth2 with JWT token validation. Keycloak serves as the identity provider (IdP), and NAT validates tokens server-side using JWKS.
+
+### Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant Client as A2A Client<br/>(AI Studio)
+    participant KC as Keycloak<br/>(auth.presidio.tech)
+    participant Agent as Factory Edge Agent<br/>(a2a.presidio.tech)
+
+    Client->>Agent: GET /.well-known/agent-card.json (public, no auth)
+    Agent-->>Client: Agent card with securitySchemes<br/>(authorizationCode + clientCredentials flows)
+
+    Client->>KC: POST /protocol/openid-connect/token<br/>(client_credentials grant, scope: agent_execute)
+    KC-->>Client: JWT access token (aud: a2a.presidio.tech)
+
+    Client->>Agent: POST / (JSON-RPC)<br/>Authorization: Bearer <JWT>
+    Agent->>KC: Fetch JWKS (cached)
+    Agent->>Agent: Validate signature, issuer, audience, scopes, expiry
+    Agent-->>Client: A2A response
+```
+
+### Architecture
+
+- **Keycloak** runs as a Docker container on the same server, exposed via Cloudflare Tunnel at `auth.presidio.tech`
+- **NAT A2A Server** validates incoming JWT tokens using the JWKS endpoint (fetched locally via `localhost:8080` to avoid hairpin through Cloudflare)
+- **Agent card** advertises both `authorizationCode` and `clientCredentials` OAuth2 flows so clients can authenticate using whichever method they support
+- **Cloudflare** terminates TLS and passes Authorization headers through to the origin without modification
+
+### Keycloak Configuration
+
+| Resource | Value |
+|----------|-------|
+| **Realm** | `agent-auth` |
+| **Client** | Confidential client with `client_credentials` grant and `standardFlowEnabled` |
+| **Client Scope** | `agent_execute` (assigned as default scope) |
+| **Audience Mapper** | Injects the A2A public URL into the `aud` claim of access tokens |
+| **User** | Optional — only needed if using authorization code flow for browser-based connections |
+
+### NAT `server_auth` Configuration
+
+```yaml
+general:
+  front_end:
+    _type: a2a
+    name: "Factory Edge Agent"
+    description: "Remote infrastructure management agent"
+    host: 0.0.0.0
+    port: 10000
+    public_base_url: "https://a2a.presidio.tech"
+    server_auth:
+      issuer_url: https://auth.presidio.tech/realms/agent-auth
+      discovery_url: https://auth.presidio.tech/realms/agent-auth/.well-known/openid-configuration
+      jwks_uri: http://localhost:8080/realms/agent-auth/protocol/openid-connect/certs
+      scopes:
+        - agent_execute
+      audience: https://a2a.presidio.tech
+```
+
+Key points:
+- **`discovery_url`** is required for NAT to resolve the correct OAuth endpoints in the agent card. Without it, NAT falls back to generic `/oauth/authorize` and `/oauth/token` paths that don't match Keycloak's OIDC paths.
+- **`jwks_uri`** points to `localhost:8080` so NAT can validate token signatures without routing through Cloudflare (avoids hairpin and Cloudflare Access interference).
+- **`issuer_url`** must match the `iss` claim in tokens exactly — this is the public Keycloak URL since that's what Keycloak stamps into tokens.
+- **`audience`** must match the `aud` claim injected by the Keycloak audience mapper.
+
+### Agent Card `clientCredentials` Flow
+
+By default, NAT only generates an `authorizationCode` flow in the agent card's `securitySchemes`. For platforms like AI Studio that use client credentials for machine-to-machine A2A calls, the agent card must also advertise a `clientCredentials` flow with the token URL. This was added via a source modification to `front_end_plugin_worker.py` (adding `ClientCredentialsOAuthFlow` alongside `AuthorizationCodeOAuthFlow`).
+
+### Cloudflare Access Considerations
+
+- **`auth.presidio.tech`** requires a **Bypass** policy (not Allow) for `/realms/*` paths. Cloudflare Access "Allow" policies require a browser session cookie — machine clients (NAT's JWKS fetcher, AI Studio's token requests) get 302-redirected to a login page even if their source IP is whitelisted.
+- **`a2a.presidio.tech`** does not need a Cloudflare Access policy — authentication is handled by the NAT OAuth middleware. Optionally, restrict by IP for defense-in-depth.
+
+### Testing Token Validation Locally
+
+```bash
+# Get a token via client credentials
+TOKEN=$(curl -s -X POST http://localhost:8080/realms/agent-auth/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=<client-id>" \
+  -d "client_secret=<client-secret>" \
+  -d "scope=agent_execute" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+
+# Test against NAT directly
+curl -s -X POST http://localhost:10000/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"agent/discover","id":"1","params":{}}' | python3 -m json.tool
+
+# Test through Cloudflare tunnel
+curl -s -X POST https://a2a.presidio.tech/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"agent/discover","id":"1","params":{}}' | python3 -m json.tool
+```
 
 ---
 
