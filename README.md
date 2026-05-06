@@ -65,10 +65,10 @@ flowchart TB
 
     CMLAgent -->|"MCP"| CMLMCP["CML MCP :3010"]
     CMLAgent -->|"Skills"| CMLSkill["cml-digital-twin"]
-    NetAgent -->|"MCP"| IOSXE["IOS-XE MCP"]
+    NetAgent -->|"MCP"| IOSXE["IOS-XE MCP :3011"]
     NetAgent -->|"Skills"| NetSkill["cisco-iosxe-mcp"]
 
-    CMLAgent --> Ollama["Ollama + qwen2.5:7b"]
+    CMLAgent --> Ollama["Ollama + nemotron-3-nano:4b-128k"]
     NetAgent --> Ollama
     GenAgent --> Ollama
     Graph --> Ollama
@@ -99,6 +99,7 @@ flowchart TB
 | **NVIDIA NeMo Agent Toolkit (NAT)** | API server (`nat serve`), A2A gateway (`nat a2a serve`), wraps the LangGraph agent |
 | **nvidia-nat-langchain** | Plugin enabling NAT to wrap existing LangGraph agents via `langgraph_wrapper` |
 | **NeMo Agent Toolkit UI** | NVIDIA-branded Next.js chat frontend with intermediate step visualization |
+| **NVIDIA Nemotron-3-Nano (4B)** | Production LLM — NVIDIA's own model running locally via Ollama with 128K context |
 | **NVIDIA Tesla T4 GPUs** | Local LLM inference via Ollama — all data stays on-premises |
 | **LangSmith/LangGraph** | Agent tracing, visualization, and evaluation |
 
@@ -123,7 +124,7 @@ flowchart TD
 
 - **Router**: Zero tools. Tiny prompt with agent names and descriptions. Classifies the request in ~1 second.
 - **CML Specialist**: Only CML MCP tools + CML digital twin skill. Handles lab management, topology creation, digital twin workflows.
-- **Network Admin Specialist**: Only IOS-XE MCP tools + network admin skill. Handles device configuration, routing, ACLs.
+- **Network Admin Specialist**: Only IOS-XE MCP tools + cisco-iosxe-mcp skill. Handles device status via RESTCONF, interface inspection, and read-only network operations. System prompt enforces RESTCONF-only access (no SSH) and provides device-to-port mapping via the skill's reference files.
 - **General**: No tools. Answers meta-questions about available capabilities using the agent registry.
 
 ### Skills (Anthropic Agent Skills Specification)
@@ -142,30 +143,43 @@ This keeps prompt context minimal for simple queries while providing full proced
 
 Testing was performed on the multi-agent routing architecture with the following models:
 
-### qwen2.5:7b (current production model)
+### nemotron-3-nano:4b-128k (current production model)
+
+NVIDIA's Nemotron-3-Nano is a 4B parameter model with native 256K context support. Ollama defaults to 4K context on GPUs with less than 24GB VRAM (each T4 is 16GB), so a custom Modelfile was required to set `num_ctx` explicitly. The `-128k` variant was created with 128K context configured, balancing context capacity with VRAM usage.
+
+**Creating the custom context variant:**
+```bash
+cat > /tmp/Modelfile << EOF
+FROM nemotron-3-nano:4b
+PARAMETER num_ctx 131072
+EOF
+ollama create nemotron-3-nano:4b-128k -f /tmp/Modelfile
+```
 
 | Query | Tokens | Latency |
 |-------|--------|---------|
-| "What tools are available?" (general route) | 607 | 8.83s |
-| "How many tools do you have?" (CML route, tool introspection) | 6,947 | 18.73s |
-| "What labs are running in CML?" (CML route, MCP tool call) | 14,057 | 16.95s |
+| "What tools are available?" (general route) | ~600 | ~6s |
+| "Get the hostname of WAN-01" (network route, MCP RESTCONF call) | ~2.7K | ~12s |
+| "List my CML labs" (CML route, MCP tool call) | ~14K | ~17s |
 
 ### Models Evaluated
 
 | Model | Size | Context | Tool Calling | Result |
 |-------|------|---------|--------------|--------|
+| **nemotron-3-nano:4b-128k** | ~2.5GB | 128K (custom) | Reliable | NVIDIA model. Requires clear system prompt instructions for optional parameter handling. Fast prefill. Selected as production model. |
+| **qwen2.5:7b** | ~4.5GB | 128K | Reliable | Follows instructions well, no thinking overhead. Previous production model — replaced by nemotron for NVIDIA alignment. |
 | **qwen3:8b** | ~5GB | 128K | Yes | Thinking mode generates hundreds of hidden tokens. 30-40s per call. Rejected. |
-| **qwen2.5:7b** | ~4.5GB | 128K | Reliable | Follows instructions, no thinking overhead. Selected as production model. |
 | **phi4-mini:3.8b** | ~2.5GB | 128K | Yes | Fast inference but ignores system prompt constraints. Hallucinated capabilities instead of listing actual tools. Rejected. |
-| **nemotron-mini:4b** | ~2.5GB | **4K** | Unreliable (~50%) | NVIDIA's model, but 4K context too small for tool definitions. Tool calling outputs raw XML instead of proper function calls ~50% of the time. Rejected. |
+| **nemotron-mini:4b** | ~2.5GB | **4K** | Unreliable (~50%) | Previous generation NVIDIA model. 4K context too small for tool definitions. Tool calling outputs raw XML instead of proper function calls ~50% of the time. Rejected. |
 
 ### Key Lessons Learned
 
+- **Ollama `num_ctx` defaults are model- and GPU-dependent.** Ollama silently reduces context windows on GPUs with less than 24GB VRAM. nemotron-3-nano:4b supports 256K natively but Ollama defaulted to 4K, causing tool call XML to truncate and produce parse errors. Always configure `num_ctx` explicitly via a custom Modelfile.
 - **Prompt size is the bottleneck, not GPU power.** T4s process ~250-350 tokens/sec for prefill. A 5K token prompt = ~15-20s just for prefill.
 - **`create_deep_agent` was the wrong starting point.** It creates a planner that makes 3-5 sequential LLM calls per request, each processing the full prompt. Replaced with multi-agent routing using `create_react_agent` per specialist.
 - **Model routing reduces per-call context by 3-4x.** Router sees ~300 tokens. Specialists see ~1-2K tokens (only their own tools) vs. a monolithic agent seeing 5.7K+ tokens.
-- **Qwen3's "thinking mode" generates invisible tokens** that waste inference time. Even with `reasoning_effort: none`, the model was unreliable. Qwen2.5:7b avoids this entirely.
-- **Small models hallucinate under constraints.** phi4-mini and nemotron-mini both failed to follow system prompt instructions reliably. 7B parameter models are the minimum for consistent tool calling and instruction following on this hardware.
+- **Smaller models need explicit operational context in the system prompt.** MCP tool descriptions that say "parameters are optional if configured via environment variables" are not specific enough for 4B models. The specialist system prompt must explicitly state which parameters to omit and which tools to avoid. Larger models (7B+) infer this more reliably from tool descriptions alone.
+- **Qwen3's "thinking mode" generates invisible tokens** that waste inference time. Even with `reasoning_effort: none`, the model was unreliable. Qwen2.5:7b and nemotron-3-nano avoid this entirely.
 
 ---
 
@@ -488,6 +502,8 @@ The agent will log `[AGENT_NAME] Loaded 1 skills: ['my-new-skill']` on startup.
 |-----------|-------|------|---------|
 | **ollama** | `ollama/ollama:latest` | 11434 | LLM inference with GPU acceleration |
 | **cml-mcp-server** | `ghcr.io/presidio-federal/cml-mcp:latest` | 3010 | Cisco Modeling Labs MCP tools |
+| **iosxe-mcp-server** | `ghcr.io/presidio-federal/cisco-ios-xe-mcp:latest` | 3011 | Cisco IOS-XE RESTCONF/SSH MCP tools |
+| **keycloak** | `quay.io/keycloak/keycloak` | 8080 | OAuth2 IdP for A2A JWT validation |
 
 ---
 
@@ -511,6 +527,13 @@ This runs a second instance of the agent for visualization only. Production traf
 # Pull the new model
 docker exec ollama ollama pull <model-name>
 
+# If the model needs a custom context window (required for GPUs < 24GB VRAM):
+cat > /tmp/Modelfile << EOF
+FROM <model-name>
+PARAMETER num_ctx 131072
+EOF
+docker exec ollama ollama create <model-name>-128k -f /tmp/Modelfile
+
 # Update environment
 sed -i 's/^OLLAMA_MODEL=.*/OLLAMA_MODEL=<model-name>/' /opt/demo-agent/.env
 sed -i 's/model: .*/model: <model-name>/' /opt/demo-agent/nat-config.yml
@@ -522,3 +545,5 @@ sudo systemctl restart nat-serve
 # Verify
 docker exec ollama ollama ps
 ```
+
+**Current production model:** `nemotron-3-nano:4b-128k` (NVIDIA Nemotron-3-Nano with 128K context configured via custom Modelfile)
